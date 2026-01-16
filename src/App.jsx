@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useMemo } from 'react';
 import {
   Upload, FileText, Filter, RefreshCw, Check, Search,
   MinusCircle, PlusCircle, ArrowUpDown, Download,
   Layers, List, Square, CheckSquare, Plus, Trash2
 } from 'lucide-react';
+import * as XLSX from 'xlsx';
 
 // --- IndexedDB Helper (For Local Persistence) ---
 const DB_NAME = 'InventoryForecasterDB';
@@ -208,7 +208,7 @@ export default function App() {
   // State for Sorting
   const [sortConfig, setSortConfig] = useState({ key: 'Purchase', direction: 'desc' });
 
-  // --- Initialize: Load from DB ---
+  // --- Initialize: Load from DB & LocalStorage ---
   useEffect(() => {
     const initData = async () => {
       try {
@@ -216,12 +216,30 @@ export default function App() {
         const savedInv = await loadFromDB('inventory');
 
         if (savedSales && savedInv) {
-          // Rehydrate dates (JSON/DB turns dates to strings)
           savedSales.forEach(r => r.date = new Date(r.date));
           savedInv.forEach(r => r.date = new Date(r.date));
           setSalesFile(savedSales);
           setInvFile(savedInv);
         }
+
+        // Load Summaries
+        const savedSummaries = localStorage.getItem('inventory_summaries');
+        if (savedSummaries) {
+          setSummaries(JSON.parse(savedSummaries));
+        }
+
+        // Load Filters
+        const savedFilters = localStorage.getItem('inventory_filters');
+        if (savedFilters) {
+          setActiveFilters(JSON.parse(savedFilters));
+        }
+
+        // Load Selection
+        const savedSelection = localStorage.getItem('inventory_selection');
+        if (savedSelection) {
+          setSelectedIds(new Set(JSON.parse(savedSelection)));
+        }
+
       } catch (e) {
         console.error("Failed to load persistence:", e);
       } finally {
@@ -230,6 +248,19 @@ export default function App() {
     };
     initData();
   }, []);
+
+  // --- Persistence Effects ---
+  useEffect(() => {
+    localStorage.setItem('inventory_summaries', JSON.stringify(summaries));
+  }, [summaries]);
+
+  useEffect(() => {
+    localStorage.setItem('inventory_filters', JSON.stringify(activeFilters));
+  }, [activeFilters]);
+
+  useEffect(() => {
+    localStorage.setItem('inventory_selection', JSON.stringify([...selectedIds]));
+  }, [selectedIds]);
 
   // --- File Handler ---
   const handleFileUpload = (e, type) => {
@@ -558,23 +589,133 @@ export default function App() {
     }
   };
 
-  const exportSummaries = () => {
-    const headers = ['Summary Name', 'Date', 'Line Items', 'Total Sold (12mo)', 'Total In Stock', 'Total Forecast', 'Total Purchase'];
-    const csvRows = [headers.join(',')];
+  const handleExportReport = () => {
+    const fileName = prompt("Enter filename for Report Excel:", `Summary_Report_${new Date().toISOString().slice(0, 10)}`);
+    if (!fileName) return;
 
+    const data = summaries.map(s => ({
+      "Summary Name": s.name,
+      "Date": s.date,
+      "Line Items": s.lineItems,
+      "Total Sold (12mo)": s.totalSold,
+      "Total In Stock": s.totalStock,
+      "Total Forecast": s.totalForecast,
+      "Total Purchase": s.totalPurchase
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Summaries");
+    XLSX.writeFile(wb, `${fileName}.xlsx`);
+  };
+
+  const handleExportBackup = () => {
+    const fileName = prompt("Enter filename for Backup Excel:", `Inventory_Backup_${new Date().toISOString().slice(0, 10)}`);
+    if (!fileName) return;
+
+    const data = [];
     summaries.forEach(s => {
-      csvRows.push([
-        `"${s.name}"`, s.date, s.lineItems, s.totalSold, s.totalStock, s.totalForecast, s.totalPurchase
-      ].join(','));
+      s.items.forEach(item => {
+        data.push({
+          "Summary Name": s.name,
+          "Summary Date": s.date,
+          "SKU": item.SKU,
+          "Item": item.Item,
+          "Vendor": item.Vendor,
+          "Description": item.Description,
+          "QTY Sold": item.QTYSold,
+          "In Stock": item.InStock,
+          "Forecast": item.Forecast,
+          "Purchase": item.Purchase,
+          "Campground": item.Campground,
+          "Department": item.Department
+        });
+      });
     });
 
-    const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `Summary_Report_${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    window.URL.revokeObjectURL(url);
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Backup_Data");
+    XLSX.writeFile(wb, `${fileName}.xlsx`);
+  };
+
+  const handleImportBackup = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const firstSheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[firstSheetName];
+        const rows = XLSX.utils.sheet_to_json(worksheet, { defval: "" }); // defval ensures empty cells are empty strings
+
+        if (rows.length === 0) return;
+
+        // Check columns (using keys of first row)
+        const sample = rows[0];
+        if (!("Summary Name" in sample)) {
+          alert("Invalid backup file format. Missing 'Summary Name' column.");
+          return;
+        }
+
+        const groups = {};
+
+        rows.forEach((row, i) => {
+          const name = row["Summary Name"];
+          if (!groups[name]) {
+            groups[name] = {
+              id: Date.now() + i,
+              name: name,
+              date: row["Summary Date"],
+              items: [],
+              totalSold: 0,
+              totalStock: 0,
+              totalForecast: 0,
+              totalPurchase: 0
+            };
+          }
+
+          // Reconstruct item
+          // Note: XLSX.utils.sheet_to_json handles data types well, but ensure numbers are numbers
+          const item = {
+            id: `${row["Campground"]}|${row["SKU"]}`,
+            SKU: String(row["SKU"]),
+            Item: row["Item"],
+            Vendor: row["Vendor"],
+            Description: row["Description"],
+            QTYSold: parseFloat(row["QTY Sold"] || 0),
+            InStock: parseFloat(row["In Stock"] || 0),
+            Forecast: parseFloat(row["Forecast"] || 0),
+            Purchase: parseFloat(row["Purchase"] || 0),
+            Campground: row["Campground"],
+            Department: row["Department"]
+          };
+
+          groups[name].items.push(item);
+          groups[name].totalSold += item.QTYSold;
+          groups[name].totalStock += item.InStock;
+          groups[name].totalForecast += item.Forecast;
+          groups[name].totalPurchase += item.Purchase;
+        });
+
+        const newSummaries = Object.values(groups).map(g => ({
+          ...g,
+          lineItems: g.items.length
+        }));
+
+        setSummaries(prev => [...prev, ...newSummaries]);
+        alert(`Imported ${newSummaries.length} summaries successfully!`);
+
+      } catch (err) {
+        console.error("Import failed:", err);
+        alert("Failed to import backup: " + err.message);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+    e.target.value = null; // Reset input
   };
 
   const handleLoadLocalData = async () => {
@@ -607,9 +748,9 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-100 flex flex-col font-sans">
+    <div className="h-screen overflow-hidden bg-slate-100 flex flex-col font-sans">
       {/* --- Top Bar & Navigation --- */}
-      <header className="bg-white border-b shadow-sm sticky top-0 z-20">
+      <header className="bg-white border-b shadow-sm flex-none z-20">
         <div className="px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="bg-blue-600 p-2 rounded-lg">
@@ -777,17 +918,28 @@ export default function App() {
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-2xl font-bold text-slate-800">Saved Summary Groups</h2>
               <button
-                onClick={exportSummaries}
+                onClick={handleExportReport}
                 disabled={summaries.length === 0}
                 className="flex items-center gap-2 bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded-lg hover:bg-slate-50 disabled:opacity-50 shadow-sm"
               >
-                <Download className="w-4 h-4" /> Export CSV
+                <Download className="w-4 h-4" /> Export Report (XLSX)
               </button>
+              <button
+                onClick={handleExportBackup}
+                disabled={summaries.length === 0}
+                className="flex items-center gap-2 bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded-lg hover:bg-slate-50 disabled:opacity-50 shadow-sm ml-2"
+              >
+                <Download className="w-4 h-4" /> Export Backup (XLSX)
+              </button>
+              <label className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 shadow-sm ml-2 cursor-pointer">
+                <Upload className="w-4 h-4" /> Import Backup
+                <input type="file" accept=".xlsx" className="hidden" onChange={handleImportBackup} />
+              </label>
             </div>
 
             <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
               <table className="w-full text-sm text-left">
-                <thead className="bg-slate-50 text-slate-600 border-b">
+                <thead className="bg-slate-50 text-slate-600 border-b sticky top-0 z-10">
                   <tr>
                     <th className="px-6 py-4">Summary Name</th>
                     <th className="px-6 py-4">Date Created</th>
