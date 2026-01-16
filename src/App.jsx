@@ -855,6 +855,11 @@ return (
           <FilterSection title="Campground" options={filterOptions.campground} selected={activeFilters.campground} onToggle={(val) => toggleFilter('campground', val)} />
           <FilterSection title="Department" options={filterOptions.department} selected={activeFilters.department} onToggle={(val) => toggleFilter('department', val)} searchable />
           <FilterSection title="Brand / Vendor" options={filterOptions.vendor} selected={activeFilters.vendor} onToggle={(val) => toggleFilter('vendor', val)} searchable />
+
+          <div className="mt-auto pt-6 text-xs text-slate-400 font-mono border-t">
+            <p>v1.2</p>
+            <p>2026-01-16 17:36</p>
+          </div>
         </aside>
 
         {/* Table Area */}
