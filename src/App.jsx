@@ -590,7 +590,7 @@ export default function App() {
   };
 
   const handleExportReport = () => {
-    const fileName = prompt("Enter filename for Report Excel:", `Summary_Report_${new Date().toISOString().slice(0, 10)}`);
+    const fileName = prompt("Enter filename for Report Table:", `Summary_Report_${new Date().toISOString().slice(0, 10)}`);
     if (!fileName) return;
 
     const data = summaries.map(s => ({
@@ -639,470 +639,129 @@ export default function App() {
     XLSX.writeFile(wb, `${fileName}.xlsx`);
   };
 
-  const handleImportBackup = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+  const file = e.target.files[0];
+  if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      try {
+  const reader = new FileReader();
+  reader.onload = (evt) => {
+    try {
+      let rows = [];
+      // Detect file type and parse accordingly
+      if (file.name.endsWith('.csv')) {
+        rows = parseCSV(evt.target.result);
+      } else {
         const data = new Uint8Array(evt.target.result);
         const workbook = XLSX.read(data, { type: 'array' });
         const firstSheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[firstSheetName];
-        const rows = XLSX.utils.sheet_to_json(worksheet, { defval: "" }); // defval ensures empty cells are empty strings
+        rows = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
+      }
 
-        if (rows.length === 0) return;
+      if (rows.length === 0) return;
 
-        // Check columns (using keys of first row)
-        const sample = rows[0];
-        if (!("Summary Name" in sample)) {
-          alert("Invalid backup file format. Missing 'Summary Name' column.");
-          return;
+      // Check columns to determine format type
+      const sample = rows[0];
+      // Normalize keys for check
+      const keys = Object.keys(sample).map(k => k.toLowerCase().trim());
+
+      const hasSKU = keys.includes("sku");
+      const hasSummaryName = keys.some(k => k.includes("summary name"));
+
+      if (!hasSummaryName) {
+        alert("Invalid file format. Missing 'Summary Name' column.");
+        return;
+      }
+
+      const groups = {};
+
+      // Helper to find value case-insensitively
+      const getVal = (row, keyPart) => {
+        const key = Object.keys(row).find(k => k.toLowerCase().includes(keyPart));
+        return key ? row[key] : undefined;
+      };
+
+      rows.forEach((row, i) => {
+        const name = getVal(row, "summary name");
+        if (!groups[name]) {
+          groups[name] = {
+            id: Date.now() + i,
+            name: name,
+            date: getVal(row, "date") || new Date().toLocaleDateString(),
+            items: [],
+            totalSold: parseFloat(getVal(row, "sold") || 0),
+            totalStock: parseFloat(getVal(row, "stock") || 0),
+            totalForecast: parseFloat(getVal(row, "forecast") || 0),
+            totalPurchase: parseFloat(getVal(row, "purchase") || 0),
+            // If legacy, we might read these totals directly. If backup, we recalc.
+            isLegacy: !hasSKU
+          };
         }
 
-        const groups = {};
-
-        rows.forEach((row, i) => {
-          const name = row["Summary Name"];
-          if (!groups[name]) {
-            groups[name] = {
-              id: Date.now() + i,
-              name: name,
-              date: row["Summary Date"],
-              items: [],
-              totalSold: 0,
-              totalStock: 0,
-              totalForecast: 0,
-              totalPurchase: 0
-            };
-          }
-
-          // Reconstruct item
-          // Note: XLSX.utils.sheet_to_json handles data types well, but ensure numbers are numbers
+        if (hasSKU) {
+          // Detailed Backup - Reconstruct items
           const item = {
-            id: `${row["Campground"]}|${row["SKU"]}`,
-            SKU: String(row["SKU"]),
-            Item: row["Item"],
-            Vendor: row["Vendor"],
-            Description: row["Description"],
-            QTYSold: parseFloat(row["QTY Sold"] || 0),
-            InStock: parseFloat(row["In Stock"] || 0),
-            Forecast: parseFloat(row["Forecast"] || 0),
-            Purchase: parseFloat(row["Purchase"] || 0),
-            Campground: row["Campground"],
-            Department: row["Department"]
+            id: `${getVal(row, "campground")}|${getVal(row, "sku")}`,
+            SKU: String(getVal(row, "sku")),
+            Item: getVal(row, "item"),
+            Vendor: getVal(row, "vendor"),
+            Description: getVal(row, "description"),
+            QTYSold: parseFloat(getVal(row, "qty sold") || 0),
+            InStock: parseFloat(getVal(row, "in stock") || 0),
+            Forecast: parseFloat(getVal(row, "forecast") || 0),
+            Purchase: parseFloat(getVal(row, "purchase") || 0),
+            Campground: getVal(row, "campground"),
+            Department: getVal(row, "department")
           };
-
           groups[name].items.push(item);
-          groups[name].totalSold += item.QTYSold;
-          groups[name].totalStock += item.InStock;
-          groups[name].totalForecast += item.Forecast;
-          groups[name].totalPurchase += item.Purchase;
+
+          // If it's a detailed backup, we should probably recalc totals from items to be safe 
+          // OR trust the row if the row was flat? 
+          // The Backup Format is flat rows. So each row adds to the total if we sum them up.
+          // BUT my export logic wrote the totals to EVERY row? verify.
+          // My Export Backup writes: Summary Name... SKU... 
+          // It does NOT write Summary Totals to every row. Wait.
+          // Let's check ExportBackup again.
+        }
+      });
+
+      // Recalculate totals for Detailed Backups (since we just pushed items)
+      if (hasSKU) {
+        Object.values(groups).forEach(g => {
+          g.totalSold = g.items.reduce((sum, i) => sum + i.QTYSold, 0);
+          g.totalStock = g.items.reduce((sum, i) => sum + i.InStock, 0);
+          g.totalForecast = g.items.reduce((sum, i) => sum + i.Forecast, 0);
+          g.totalPurchase = g.items.reduce((sum, i) => sum + i.Purchase, 0);
         });
-
-        const newSummaries = Object.values(groups).map(g => ({
-          ...g,
-          lineItems: g.items.length
-        }));
-
-        setSummaries(prev => [...prev, ...newSummaries]);
-        alert(`Imported ${newSummaries.length} summaries successfully!`);
-
-      } catch (err) {
-        console.error("Import failed:", err);
-        alert("Failed to import backup: " + err.message);
       }
-    };
-    reader.readAsArrayBuffer(file);
-    e.target.value = null; // Reset input
-  };
 
-  const handleLoadLocalData = async () => {
-    try {
-      setIsProcessing(true);
+      const newSummaries = Object.values(groups).map(g => ({
+        ...g,
+        lineItems: hasSKU ? g.items.length : (parseFloat(g.lineItems) || 0) // Legacy has lineItems column? Yes
+      }));
 
-      const salesRes = await fetch('/data/sales.csv');
-      const salesText = await salesRes.text();
-      const salesData = normalizeData(parseCSV(salesText), 'sales');
-      setSalesFile(salesData);
-      await saveToDB('sales', salesData);
+      setSummaries(prev => [...prev, ...newSummaries]);
+      alert(`Imported ${newSummaries.length} summaries successfully!`);
 
-      const invRes = await fetch('/data/inventory.csv');
-      const invRaw = await invRes.text();
-      const invRepaired = repairMalformatedCSV(invRaw, 'inventory');
-      const invData = normalizeData(parseCSV(invRepaired), 'inventory');
-      setInvFile(invData);
-      await saveToDB('inventory', invData);
-
-      setIsProcessing(false);
     } catch (err) {
-      console.error("Failed to load local data:", err);
-      alert("Failed to load local data: " + err.message);
-      setIsProcessing(false);
+      console.error("Import failed:", err);
+      alert("Failed to import: " + err.message);
     }
   };
 
-  if (!salesFile || !invFile) {
-    return <UploadScreen onUpload={handleFileUpload} sales={salesFile} inv={invFile} onLoadLocal={handleLoadLocalData} />;
+  if (file.name.endsWith('.csv')) {
+    reader.readAsText(file);
+  } else {
+    reader.readAsArrayBuffer(file);
   }
+  e.target.value = null; // Reset input
+};
 
-  return (
-    <div className="h-screen overflow-hidden bg-slate-100 flex flex-col font-sans">
-      {/* --- Top Bar & Navigation --- */}
-      <header className="bg-white border-b shadow-sm flex-none z-20">
-        <div className="px-6 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="bg-blue-600 p-2 rounded-lg">
-              <RefreshCw className={`w-5 h-5 text-white ${isProcessing ? 'animate-spin' : ''}`} />
-            </div>
-            <div>
-              <h1 className="text-xl font-bold text-slate-800">Inventory Forecaster</h1>
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <TabButton icon={List} label="Inventory List" active={activeTab === 'list'} onClick={() => setActiveTab('list')} />
-            <TabButton icon={Layers} label="Summary Reports" active={activeTab === 'summary'} onClick={() => setActiveTab('summary')} count={summaries.length} />
-            <div className="h-8 w-px bg-slate-200 mx-2"></div>
-            <button
-              onClick={handleClearData}
-              className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-red-600 hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors"
-              title="Clear all data and start over"
-            >
-              <Trash2 className="w-4 h-4" /> Reset
-            </button>
-          </div>
-        </div>
-      </header>
-
-      {/* --- Main Content Area --- */}
-      {activeTab === 'list' ? (
-        <div className="flex-1 overflow-hidden flex">
-          {/* Sidebar */}
-          <aside className="w-80 bg-white border-r overflow-y-auto p-4 flex flex-col gap-6 shrink-0 shadow-inner">
-            <div className="flex items-center justify-between">
-              <h2 className="font-semibold text-slate-800 flex items-center gap-2">
-                <Filter className="w-4 h-4" /> Filters
-              </h2>
-              <button onClick={resetAllFilters} className="text-xs text-blue-600 hover:underline">
-                Reset All
-              </button>
-            </div>
-
-            <div className="space-y-4 border-b pb-6">
-              <div>
-                <label className="text-xs font-semibold text-slate-700 uppercase tracking-wider block mb-1">SKU</label>
-                <input
-                  type="text"
-                  placeholder="Search SKU..."
-                  className="w-full px-3 py-2 text-sm border border-slate-300 rounded focus:ring-1 focus:ring-blue-500 outline-none"
-                  value={activeFilters.itemSku}
-                  onChange={(e) => handleTextFilter('itemSku', e.target.value)}
-                />
-              </div>
-              <TextFilterGroup label="Item Name" includeVal={activeFilters.itemIncludes} excludeVal={activeFilters.itemExcludes} onIncludeChange={(v) => handleTextFilter('itemIncludes', v)} onExcludeChange={(v) => handleTextFilter('itemExcludes', v)} />
-              <TextFilterGroup label="Description" includeVal={activeFilters.descIncludes} excludeVal={activeFilters.descExcludes} onIncludeChange={(v) => handleTextFilter('descIncludes', v)} onExcludeChange={(v) => handleTextFilter('descExcludes', v)} />
-            </div>
-
-            <div className="space-y-4 border-b pb-6">
-              <div className="text-xs font-semibold text-slate-700 uppercase tracking-wider">Numeric Ranges</div>
-              <NumericRangeFilter label="QTY Sold (12mo)" minVal={activeFilters.qtyMin} maxVal={activeFilters.qtyMax} onMinChange={(v) => handleTextFilter('qtyMin', v)} onMaxChange={(v) => handleTextFilter('qtyMax', v)} />
-              <NumericRangeFilter label="In Stock" minVal={activeFilters.stockMin} maxVal={activeFilters.stockMax} onMinChange={(v) => handleTextFilter('stockMin', v)} onMaxChange={(v) => handleTextFilter('stockMax', v)} />
-            </div>
-
-            <FilterSection title="Campground" options={filterOptions.campground} selected={activeFilters.campground} onToggle={(val) => toggleFilter('campground', val)} />
-            <FilterSection title="Department" options={filterOptions.department} selected={activeFilters.department} onToggle={(val) => toggleFilter('department', val)} searchable />
-            <FilterSection title="Brand / Vendor" options={filterOptions.vendor} selected={activeFilters.vendor} onToggle={(val) => toggleFilter('vendor', val)} searchable />
-          </aside>
-
-          {/* Table Area */}
-          <main className="flex-1 overflow-y-auto p-6 relative">
-            <div className="bg-white rounded-lg shadow border border-slate-200 overflow-hidden mb-16">
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left">
-                  <thead className="bg-slate-50 text-slate-600 font-semibold border-b sticky top-0 z-10">
-                    <tr>
-                      <th className="px-3 py-3 w-10 text-center min-w-[40px]">
-                        <button onClick={toggleSelectAll} className="hover:text-blue-600">
-                          {selectedIds.size === filteredData.length && filteredData.length > 0 ? <CheckSquare className="w-4 h-4 text-blue-600" /> : <Square className="w-4 h-4 text-slate-400" />}
-                        </button>
-                      </th>
-                      <th className="px-4 py-3 min-w-[120px]">Campground</th>
-                      <th className="px-4 py-3 min-w-[120px]">Department</th>
-                      <SortableHeader label="SKU" sortKey="SKU" currentSort={sortConfig} onSort={handleSort} />
-                      <th className="px-4 py-3 min-w-[150px]">Item</th>
-                      <th className="px-4 py-3 min-w-[150px]">Brand/Vendor</th>
-                      <th className="px-4 py-3 min-w-[200px]">Description</th>
-                      <SortableHeader label="QTY Sold (12mo)" sortKey="QTYSold" currentSort={sortConfig} onSort={handleSort} className="min-w-[140px] text-right" />
-                      <SortableHeader label="In Stock" sortKey="InStock" currentSort={sortConfig} onSort={handleSort} className="min-w-[100px] text-right" />
-                      <SortableHeader label="Forecast" sortKey="Forecast" currentSort={sortConfig} onSort={handleSort} className="min-w-[100px] text-right" />
-                      <SortableHeader label="Purchase" sortKey="Purchase" currentSort={sortConfig} onSort={handleSort} className="bg-blue-50 text-blue-800 min-w-[100px] text-right" />
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {filteredData.map((row) => {
-                      const isSelected = selectedIds.has(row.id);
-                      return (
-                        <tr key={row.id} className={`hover:bg-slate-50 transition-colors ${!isSelected ? 'opacity-50 grayscale' : ''}`}>
-                          <td className="px-3 py-2 text-center">
-                            <button onClick={() => toggleSelection(row.id)}>
-                              {isSelected ? <CheckSquare className="w-4 h-4 text-blue-600" /> : <Square className="w-4 h-4 text-slate-300" />}
-                            </button>
-                          </td>
-                          <td className="px-4 py-2 font-medium text-slate-800">{row.Campground}</td>
-                          <td className="px-4 py-2 text-slate-600">{row.Department}</td>
-                          <td className="px-4 py-2 font-mono text-xs text-slate-500">{row.SKU}</td>
-                          <td className="px-4 py-2 text-slate-800 font-medium">{row.Item}</td>
-                          <td className="px-4 py-2 text-slate-600">{row.Vendor}</td>
-                          <td className="px-4 py-2 text-slate-500 truncate max-w-xs">{row.Description}</td>
-                          <td className="px-4 py-2 text-right font-mono">{row.QTYSold.toLocaleString()}</td>
-                          <td className="px-4 py-2 text-right font-mono text-slate-500">{row.InStock}</td>
-                          <td className="px-4 py-2 text-right font-mono text-slate-500">{row.Forecast.toLocaleString()}</td>
-                          <td className="px-4 py-2 text-right font-mono font-bold bg-blue-50 text-blue-800 border-l border-blue-100">
-                            {row.Purchase.toLocaleString()}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                    {filteredData.length === 0 && (
-                      <tr><td colSpan="10" className="p-8 text-center text-slate-400">No items match your filters.</td></tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            {/* Floating Action Footer */}
-            <div className="fixed bottom-6 right-8 left-[22rem] bg-white border border-slate-200 shadow-xl rounded-xl p-4 flex items-center justify-between z-20 animate-in slide-in-from-bottom-4">
-              <div className="flex items-center gap-6">
-                <div>
-                  <span className="text-xs text-slate-500 uppercase tracking-wider font-semibold">Selection</span>
-                  <div className="text-lg font-bold text-slate-800">{selectedIds.size} <span className="text-sm font-normal text-slate-500">items</span></div>
-                </div>
-                <div className="h-8 w-px bg-slate-200"></div>
-                <div className="flex gap-6 text-sm">
-                  <div>
-                    <div className="text-slate-500 text-xs">Total Sold</div>
-                    <div className="font-semibold">{totals.sold.toLocaleString()}</div>
-                  </div>
-                  <div>
-                    <div className="text-slate-500 text-xs">Total Stock</div>
-                    <div className="font-semibold">{totals.stock.toLocaleString()}</div>
-                  </div>
-                  <div>
-                    <div className="text-slate-500 text-xs">Total Forecast</div>
-                    <div className="font-semibold">{totals.forecast.toLocaleString()}</div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-4">
-                <div className="bg-blue-50 px-4 py-2 rounded-lg text-right">
-                  <div className="text-xs text-blue-600 font-semibold uppercase">Total Purchase</div>
-                  <div className="text-xl font-bold text-blue-800">{totals.purchase.toLocaleString()}</div>
-                </div>
-                <button
-                  onClick={() => setShowNameModal(true)}
-                  className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-3 rounded-lg font-semibold shadow-lg hover:shadow-blue-200 transition-all flex items-center gap-2"
-                >
-                  <Plus className="w-5 h-5" /> Create Summary Group
-                </button>
-              </div>
-            </div>
-          </main>
-        </div>
-      ) : (
-        /* --- Summary Reports Tab --- */
-        <div className="flex-1 bg-slate-50 p-8 overflow-y-auto">
-          <div className="max-w-5xl mx-auto">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-2xl font-bold text-slate-800">Saved Summary Groups</h2>
-              <button
-                onClick={handleExportReport}
-                disabled={summaries.length === 0}
-                className="flex items-center gap-2 bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded-lg hover:bg-slate-50 disabled:opacity-50 shadow-sm"
-              >
-                <Download className="w-4 h-4" /> Export Report (XLSX)
-              </button>
-              <button
-                onClick={handleExportBackup}
-                disabled={summaries.length === 0}
-                className="flex items-center gap-2 bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded-lg hover:bg-slate-50 disabled:opacity-50 shadow-sm ml-2"
-              >
-                <Download className="w-4 h-4" /> Export Backup (XLSX)
-              </button>
-              <label className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 shadow-sm ml-2 cursor-pointer">
-                <Upload className="w-4 h-4" /> Import Backup
-                <input type="file" accept=".xlsx" className="hidden" onChange={handleImportBackup} />
-              </label>
-            </div>
-
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-              <table className="w-full text-sm text-left">
-                <thead className="bg-slate-50 text-slate-600 border-b sticky top-0 z-10">
-                  <tr>
-                    <th className="px-6 py-4">Summary Name</th>
-                    <th className="px-6 py-4">Date Created</th>
-                    <th className="px-6 py-4 text-right">Line Items</th>
-                    <th className="px-6 py-4 text-right">Total Sold (12mo)</th>
-                    <th className="px-6 py-4 text-right">Total In Stock</th>
-                    <th className="px-6 py-4 text-right">Total Forecast</th>
-                    <th className="px-6 py-4 text-right bg-blue-50 text-blue-800">Total Purchase</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {summaries.map((s) => (
-                    <tr
-                      key={s.id}
-                      className="hover:bg-slate-50 cursor-pointer group"
-                      onClick={() => {
-                        setModalSearch('');
-                        setSelectedSummary(s);
-                      }}
-                    >
-                      <td className="px-6 py-4 font-bold text-slate-800 flex items-center gap-2">
-                        {s.name}
-                      </td>
-                      <td className="px-6 py-4 text-slate-500">{s.date}</td>
-                      <td className="px-6 py-4 text-right font-mono">{s.lineItems}</td>
-                      <td className="px-6 py-4 text-right font-mono">{s.totalSold.toLocaleString()}</td>
-                      <td className="px-6 py-4 text-right font-mono">{s.totalStock.toLocaleString()}</td>
-                      <td className="px-6 py-4 text-right font-mono">{s.totalForecast.toLocaleString()}</td>
-                      <td className="px-6 py-4 text-right font-mono font-bold bg-blue-50 text-blue-800 border-l border-blue-100">
-                        {s.totalPurchase.toLocaleString()}
-                      </td>
-                      <td className="px-6 py-4 text-right w-10">
-                        <button
-                          onClick={(e) => { e.stopPropagation(); deleteSummary(s.id); }}
-                          className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors opacity-0 group-hover:opacity-100"
-                          title="Delete Summary"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                  {summaries.length === 0 && (
-                    <tr><td colSpan="8" className="p-12 text-center text-slate-400">No summaries created yet. Go to the "Inventory List" tab to create one.</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* --- Name Prompt Modal --- */}
-      {showNameModal && (
-        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 backdrop-blur-sm">
-          <div className="bg-white p-6 rounded-xl shadow-2xl w-96 animate-in zoom-in-95">
-            <h3 className="text-lg font-bold mb-4">Name this Summary</h3>
-            <input
-              type="text"
-              autoFocus
-              placeholder="e.g. MGC Toys Order..."
-              className="w-full border border-slate-300 rounded-lg p-3 mb-6 focus:ring-2 focus:ring-blue-500 outline-none"
-              value={summaryNameInput}
-              onChange={(e) => setSummaryNameInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && createSummary()}
-            />
-            <div className="flex justify-end gap-3">
-              <button onClick={() => setShowNameModal(false)} className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg">Cancel</button>
-              <button onClick={createSummary} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium">Create</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* --- Summary Detail Modal --- */}
-      {selectedSummary && (
-        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 backdrop-blur-sm" onClick={() => setSelectedSummary(null)}>
-          <div className="bg-white rounded-xl shadow-2xl w-[90%] max-w-4xl max-h-[90vh] flex flex-col animate-in zoom-in-95" onClick={e => e.stopPropagation()}>
-            <div className="px-6 py-4 border-b flex items-center justify-between gap-4">
-              <div>
-                <h3 className="text-lg font-bold text-slate-800">{selectedSummary.name}</h3>
-                <p className="text-sm text-slate-500">{selectedSummary.date} • {selectedSummary.lineItems} items</p>
-              </div>
-              <div className="flex items-center gap-4 flex-1 justify-end">
-                <div className="relative">
-                  <Search className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
-                  <input
-                    type="text"
-                    placeholder="Search in summary..."
-                    className="pl-9 pr-4 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none w-64"
-                    value={modalSearch}
-                    onChange={(e) => setModalSearch(e.target.value)}
-                  />
-                </div>
-                <button onClick={() => setSelectedSummary(null)} className="p-2 hover:bg-slate-100 rounded-lg">
-                  <MinusCircle className="w-5 h-5 text-slate-400" />
-                </button>
-              </div>
-            </div>
-            <div className="overflow-auto p-0 flex-1">
-              <table className="w-full text-sm text-left">
-                <thead className="bg-slate-50 text-slate-600 sticky top-0 border-b shadow-sm">
-                  <tr>
-                    <th className="px-4 py-2 bg-slate-50">SKU</th>
-                    <th className="px-4 py-2 bg-slate-50">Item</th>
-                    <th className="px-4 py-2 bg-slate-50">Vendor</th>
-                    <th className="px-4 py-2 bg-slate-50">Description</th>
-                    <th className="px-4 py-2 bg-slate-50 text-right">Forecast</th>
-                    <th className="px-4 py-2 bg-slate-50 text-right">In Stock</th>
-                    <th className="px-4 py-2 bg-slate-50 text-right bg-blue-50 text-blue-800">Purchase</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {(selectedSummary.items || [])
-                    .filter(row => {
-                      if (!modalSearch) return true;
-                      const term = modalSearch.toLowerCase();
-                      return (
-                        (row.SKU || '').toLowerCase().includes(term) ||
-                        (row.Item || '').toLowerCase().includes(term) ||
-                        (row.Vendor || '').toLowerCase().includes(term) ||
-                        (row.Description || '').toLowerCase().includes(term)
-                      );
-                    })
-                    .map(row => (
-                      <tr key={row.id} className="hover:bg-slate-50">
-                        <td className="px-4 py-2 font-mono text-xs text-slate-500">{row.SKU}</td>
-                        <td className="px-4 py-2 font-medium">{row.Item}</td>
-                        <td className="px-4 py-2 text-slate-500">{row.Vendor}</td>
-                        <td className="px-4 py-2 text-slate-500 truncate max-w-xs">{row.Description}</td>
-                        <td className="px-4 py-2 text-right font-mono">{row.Forecast}</td>
-                        <td className="px-4 py-2 text-right font-mono text-slate-500">{row.InStock}</td>
-                        <td className="px-4 py-2 text-right font-mono font-bold bg-blue-50 text-blue-800">{row.Purchase}</td>
-                      </tr>
-                    ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="px-6 py-4 border-t bg-slate-50 flex justify-end">
-              <button
-                onClick={() => setSelectedSummary(null)}
-                className="px-4 py-2 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-lg shadow-sm"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// --- Sub-Components ---
-
-// --- UploadScreen Component ---
 const handleLoadLocalData = async () => {
   try {
     setIsProcessing(true);
 
     const salesRes = await fetch('/data/sales.csv');
     const salesText = await salesRes.text();
-    // Sales file seems okay, but we can pass it through just in case
     const salesData = normalizeData(parseCSV(salesText), 'sales');
     setSalesFile(salesData);
     await saveToDB('sales', salesData);
@@ -1117,11 +776,367 @@ const handleLoadLocalData = async () => {
     setIsProcessing(false);
   } catch (err) {
     console.error("Failed to load local data:", err);
-    // alert("Failed to load local data. Make sure 'public/data/sales.csv' and 'public/data/inventory.csv' exist.");
     alert("Failed to load local data: " + err.message);
     setIsProcessing(false);
   }
 };
+
+if (!salesFile || !invFile) {
+  return <UploadScreen onUpload={handleFileUpload} sales={salesFile} inv={invFile} onLoadLocal={handleLoadLocalData} />;
+}
+
+return (
+  <div className="h-screen overflow-hidden bg-slate-100 flex flex-col font-sans">
+    {/* --- Top Bar & Navigation --- */}
+    <header className="bg-white border-b shadow-sm flex-none z-20">
+      <div className="px-6 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="bg-blue-600 p-2 rounded-lg">
+            <RefreshCw className={`w-5 h-5 text-white ${isProcessing ? 'animate-spin' : ''}`} />
+          </div>
+          <div>
+            <h1 className="text-xl font-bold text-slate-800">Inventory Forecaster</h1>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <TabButton icon={List} label="Inventory List" active={activeTab === 'list'} onClick={() => setActiveTab('list')} />
+          <TabButton icon={Layers} label="Summary Reports" active={activeTab === 'summary'} onClick={() => setActiveTab('summary')} count={summaries.length} />
+          <div className="h-8 w-px bg-slate-200 mx-2"></div>
+          <label className="flex items-center gap-2 bg-blue-600 text-white px-3 py-2 rounded-lg hover:bg-blue-700 shadow-sm cursor-pointer text-sm font-medium transition-colors">
+            <Upload className="w-4 h-4" /> Import Backup
+            <input type="file" accept=".xlsx, .xls, .csv" className="hidden" onChange={handleImportBackup} />
+          </label>
+          <button
+            onClick={handleClearData}
+            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-red-600 hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors"
+            title="Clear all data and start over"
+          >
+            <Trash2 className="w-4 h-4" /> Reset
+          </button>
+        </div>
+      </div>
+    </header>
+
+    {/* --- Main Content Area --- */}
+    {activeTab === 'list' ? (
+      <div className="flex-1 overflow-hidden flex">
+        {/* Sidebar */}
+        <aside className="w-80 bg-white border-r overflow-y-auto p-4 flex flex-col gap-6 shrink-0 shadow-inner">
+          <div className="flex items-center justify-between">
+            <h2 className="font-semibold text-slate-800 flex items-center gap-2">
+              <Filter className="w-4 h-4" /> Filters
+            </h2>
+            <button onClick={resetAllFilters} className="text-xs text-blue-600 hover:underline">
+              Reset All
+            </button>
+          </div>
+
+          <div className="space-y-4 border-b pb-6">
+            <div>
+              <label className="text-xs font-semibold text-slate-700 uppercase tracking-wider block mb-1">SKU</label>
+              <input
+                type="text"
+                placeholder="Search SKU..."
+                className="w-full px-3 py-2 text-sm border border-slate-300 rounded focus:ring-1 focus:ring-blue-500 outline-none"
+                value={activeFilters.itemSku}
+                onChange={(e) => handleTextFilter('itemSku', e.target.value)}
+              />
+            </div>
+            <TextFilterGroup label="Item Name" includeVal={activeFilters.itemIncludes} excludeVal={activeFilters.itemExcludes} onIncludeChange={(v) => handleTextFilter('itemIncludes', v)} onExcludeChange={(v) => handleTextFilter('itemExcludes', v)} />
+            <TextFilterGroup label="Description" includeVal={activeFilters.descIncludes} excludeVal={activeFilters.descExcludes} onIncludeChange={(v) => handleTextFilter('descIncludes', v)} onExcludeChange={(v) => handleTextFilter('descExcludes', v)} />
+          </div>
+
+          <div className="space-y-4 border-b pb-6">
+            <div className="text-xs font-semibold text-slate-700 uppercase tracking-wider">Numeric Ranges</div>
+            <NumericRangeFilter label="QTY Sold (12mo)" minVal={activeFilters.qtyMin} maxVal={activeFilters.qtyMax} onMinChange={(v) => handleTextFilter('qtyMin', v)} onMaxChange={(v) => handleTextFilter('qtyMax', v)} />
+            <NumericRangeFilter label="In Stock" minVal={activeFilters.stockMin} maxVal={activeFilters.stockMax} onMinChange={(v) => handleTextFilter('stockMin', v)} onMaxChange={(v) => handleTextFilter('stockMax', v)} />
+          </div>
+
+          <FilterSection title="Campground" options={filterOptions.campground} selected={activeFilters.campground} onToggle={(val) => toggleFilter('campground', val)} />
+          <FilterSection title="Department" options={filterOptions.department} selected={activeFilters.department} onToggle={(val) => toggleFilter('department', val)} searchable />
+          <FilterSection title="Brand / Vendor" options={filterOptions.vendor} selected={activeFilters.vendor} onToggle={(val) => toggleFilter('vendor', val)} searchable />
+        </aside>
+
+        {/* Table Area */}
+        <main className="flex-1 overflow-y-auto p-6 relative">
+          <div className="bg-white rounded-lg shadow border border-slate-200 overflow-hidden mb-16">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm text-left">
+                <thead className="bg-slate-50 text-slate-600 font-semibold border-b sticky top-0 z-10">
+                  <tr>
+                    <th className="px-3 py-3 w-10 text-center min-w-[40px]">
+                      <button onClick={toggleSelectAll} className="hover:text-blue-600">
+                        {selectedIds.size === filteredData.length && filteredData.length > 0 ? <CheckSquare className="w-4 h-4 text-blue-600" /> : <Square className="w-4 h-4 text-slate-400" />}
+                      </button>
+                    </th>
+                    <th className="px-4 py-3 min-w-[120px]">Campground</th>
+                    <th className="px-4 py-3 min-w-[120px]">Department</th>
+                    <SortableHeader label="SKU" sortKey="SKU" currentSort={sortConfig} onSort={handleSort} />
+                    <th className="px-4 py-3 min-w-[150px]">Item</th>
+                    <th className="px-4 py-3 min-w-[150px]">Brand/Vendor</th>
+                    <th className="px-4 py-3 min-w-[200px]">Description</th>
+                    <SortableHeader label="QTY Sold (12mo)" sortKey="QTYSold" currentSort={sortConfig} onSort={handleSort} className="min-w-[140px] text-right" />
+                    <SortableHeader label="In Stock" sortKey="InStock" currentSort={sortConfig} onSort={handleSort} className="min-w-[100px] text-right" />
+                    <SortableHeader label="Forecast" sortKey="Forecast" currentSort={sortConfig} onSort={handleSort} className="min-w-[100px] text-right" />
+                    <SortableHeader label="Purchase" sortKey="Purchase" currentSort={sortConfig} onSort={handleSort} className="bg-blue-50 text-blue-800 min-w-[100px] text-right" />
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {filteredData.map((row) => {
+                    const isSelected = selectedIds.has(row.id);
+                    return (
+                      <tr key={row.id} className={`hover:bg-slate-50 transition-colors ${!isSelected ? 'opacity-50 grayscale' : ''}`}>
+                        <td className="px-3 py-2 text-center">
+                          <button onClick={() => toggleSelection(row.id)}>
+                            {isSelected ? <CheckSquare className="w-4 h-4 text-blue-600" /> : <Square className="w-4 h-4 text-slate-300" />}
+                          </button>
+                        </td>
+                        <td className="px-4 py-2 font-medium text-slate-800">{row.Campground}</td>
+                        <td className="px-4 py-2 text-slate-600">{row.Department}</td>
+                        <td className="px-4 py-2 font-mono text-xs text-slate-500">{row.SKU}</td>
+                        <td className="px-4 py-2 text-slate-800 font-medium">{row.Item}</td>
+                        <td className="px-4 py-2 text-slate-600">{row.Vendor}</td>
+                        <td className="px-4 py-2 text-slate-500 truncate max-w-xs">{row.Description}</td>
+                        <td className="px-4 py-2 text-right font-mono">{row.QTYSold.toLocaleString()}</td>
+                        <td className="px-4 py-2 text-right font-mono text-slate-500">{row.InStock}</td>
+                        <td className="px-4 py-2 text-right font-mono text-slate-500">{row.Forecast.toLocaleString()}</td>
+                        <td className="px-4 py-2 text-right font-mono font-bold bg-blue-50 text-blue-800 border-l border-blue-100">
+                          {row.Purchase.toLocaleString()}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {filteredData.length === 0 && (
+                    <tr><td colSpan="10" className="p-8 text-center text-slate-400">No items match your filters.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Floating Action Footer */}
+          <div className="fixed bottom-6 right-8 left-[22rem] bg-white border border-slate-200 shadow-xl rounded-xl p-4 flex items-center justify-between z-20 animate-in slide-in-from-bottom-4">
+            <div className="flex items-center gap-6">
+              <div>
+                <span className="text-xs text-slate-500 uppercase tracking-wider font-semibold">Selection</span>
+                <div className="text-lg font-bold text-slate-800">{selectedIds.size} <span className="text-sm font-normal text-slate-500">items</span></div>
+              </div>
+              <div className="h-8 w-px bg-slate-200"></div>
+              <div className="flex gap-6 text-sm">
+                <div>
+                  <div className="text-slate-500 text-xs">Total Sold</div>
+                  <div className="font-semibold">{totals.sold.toLocaleString()}</div>
+                </div>
+                <div>
+                  <div className="text-slate-500 text-xs">Total Stock</div>
+                  <div className="font-semibold">{totals.stock.toLocaleString()}</div>
+                </div>
+                <div>
+                  <div className="text-slate-500 text-xs">Total Forecast</div>
+                  <div className="font-semibold">{totals.forecast.toLocaleString()}</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-4">
+              <div className="bg-blue-50 px-4 py-2 rounded-lg text-right">
+                <div className="text-xs text-blue-600 font-semibold uppercase">Total Purchase</div>
+                <div className="text-xl font-bold text-blue-800">{totals.purchase.toLocaleString()}</div>
+              </div>
+              <button
+                onClick={() => setShowNameModal(true)}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-3 rounded-lg font-semibold shadow-lg hover:shadow-blue-200 transition-all flex items-center gap-2"
+              >
+                <Plus className="w-5 h-5" /> Create Summary Group
+              </button>
+            </div>
+          </div>
+        </main>
+      </div>
+    ) : (
+      /* --- Summary Reports Tab --- */
+      <div className="flex-1 bg-slate-50 p-8 overflow-y-auto">
+        <div className="max-w-5xl mx-auto">
+          <div className="flex items-center justify-between mb-6">
+            <h2 className="text-2xl font-bold text-slate-800">Saved Summary Groups</h2>
+            <div className="flex gap-2">
+              <button
+                onClick={handleExportReport}
+                disabled={summaries.length === 0}
+                className="flex items-center gap-2 bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded-lg hover:bg-slate-50 disabled:opacity-50 shadow-sm"
+              >
+                <Download className="w-4 h-4" /> Export Table
+              </button>
+              <button
+                onClick={handleExportBackup}
+                disabled={summaries.length === 0}
+                className="flex items-center gap-2 bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded-lg hover:bg-slate-50 disabled:opacity-50 shadow-sm"
+              >
+                <Download className="w-4 h-4" /> Export Backup
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+            <table className="w-full text-sm text-left">
+              <thead className="bg-slate-50 text-slate-600 border-b sticky top-0 z-10">
+                <tr>
+                  <th className="px-6 py-4">Summary Name</th>
+                  <th className="px-6 py-4">Date Created</th>
+                  <th className="px-6 py-4 text-right">Line Items</th>
+                  <th className="px-6 py-4 text-right">Total Sold (12mo)</th>
+                  <th className="px-6 py-4 text-right">Total In Stock</th>
+                  <th className="px-6 py-4 text-right">Total Forecast</th>
+                  <th className="px-6 py-4 text-right bg-blue-50 text-blue-800">Total Purchase</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {summaries.map((s) => (
+                  <tr
+                    key={s.id}
+                    className="hover:bg-slate-50 cursor-pointer group"
+                    onClick={() => {
+                      setModalSearch('');
+                      setSelectedSummary(s);
+                    }}
+                  >
+                    <td className="px-6 py-4 font-bold text-slate-800 flex items-center gap-2">
+                      {s.name}
+                    </td>
+                    <td className="px-6 py-4 text-slate-500">{s.date}</td>
+                    <td className="px-6 py-4 text-right font-mono">{s.lineItems}</td>
+                    <td className="px-6 py-4 text-right font-mono">{s.totalSold.toLocaleString()}</td>
+                    <td className="px-6 py-4 text-right font-mono">{s.totalStock.toLocaleString()}</td>
+                    <td className="px-6 py-4 text-right font-mono">{s.totalForecast.toLocaleString()}</td>
+                    <td className="px-6 py-4 text-right font-mono font-bold bg-blue-50 text-blue-800 border-l border-blue-100">
+                      {s.totalPurchase.toLocaleString()}
+                    </td>
+                    <td className="px-6 py-4 text-right w-10">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); deleteSummary(s.id); }}
+                        className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors opacity-0 group-hover:opacity-100"
+                        title="Delete Summary"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {summaries.length === 0 && (
+                  <tr><td colSpan="8" className="p-12 text-center text-slate-400">No summaries created yet. Go to the "Inventory List" tab to create one.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* --- Name Prompt Modal --- */}
+    {showNameModal && (
+      <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 backdrop-blur-sm">
+        <div className="bg-white p-6 rounded-xl shadow-2xl w-96 animate-in zoom-in-95">
+          <h3 className="text-lg font-bold mb-4">Name this Summary</h3>
+          <input
+            type="text"
+            autoFocus
+            placeholder="e.g. MGC Toys Order..."
+            className="w-full border border-slate-300 rounded-lg p-3 mb-6 focus:ring-2 focus:ring-blue-500 outline-none"
+            value={summaryNameInput}
+            onChange={(e) => setSummaryNameInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && createSummary()}
+          />
+          <div className="flex justify-end gap-3">
+            <button onClick={() => setShowNameModal(false)} className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg">Cancel</button>
+            <button onClick={createSummary} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium">Create</button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* --- Summary Detail Modal --- */}
+    {selectedSummary && (
+      <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 backdrop-blur-sm" onClick={() => setSelectedSummary(null)}>
+        <div className="bg-white rounded-xl shadow-2xl w-[90%] max-w-4xl max-h-[90vh] flex flex-col animate-in zoom-in-95" onClick={e => e.stopPropagation()}>
+          <div className="px-6 py-4 border-b flex items-center justify-between gap-4">
+            <div>
+              <h3 className="text-lg font-bold text-slate-800">{selectedSummary.name}</h3>
+              <p className="text-sm text-slate-500">{selectedSummary.date} • {selectedSummary.lineItems} items</p>
+            </div>
+            <div className="flex items-center gap-4 flex-1 justify-end">
+              <div className="relative">
+                <Search className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Search in summary..."
+                  className="pl-9 pr-4 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none w-64"
+                  value={modalSearch}
+                  onChange={(e) => setModalSearch(e.target.value)}
+                />
+              </div>
+              <button onClick={() => setSelectedSummary(null)} className="p-2 hover:bg-slate-100 rounded-lg">
+                <MinusCircle className="w-5 h-5 text-slate-400" />
+              </button>
+            </div>
+          </div>
+          <div className="overflow-auto p-0 flex-1">
+            <table className="w-full text-sm text-left">
+              <thead className="bg-slate-50 text-slate-600 sticky top-0 border-b shadow-sm">
+                <tr>
+                  <th className="px-4 py-2 bg-slate-50">SKU</th>
+                  <th className="px-4 py-2 bg-slate-50">Item</th>
+                  <th className="px-4 py-2 bg-slate-50">Vendor</th>
+                  <th className="px-4 py-2 bg-slate-50">Description</th>
+                  <th className="px-4 py-2 bg-slate-50 text-right">Forecast</th>
+                  <th className="px-4 py-2 bg-slate-50 text-right">In Stock</th>
+                  <th className="px-4 py-2 bg-slate-50 text-right bg-blue-50 text-blue-800">Purchase</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {(selectedSummary.items || [])
+                  .filter(row => {
+                    if (!modalSearch) return true;
+                    const term = modalSearch.toLowerCase();
+                    return (
+                      (row.SKU || '').toLowerCase().includes(term) ||
+                      (row.Item || '').toLowerCase().includes(term) ||
+                      (row.Vendor || '').toLowerCase().includes(term) ||
+                      (row.Description || '').toLowerCase().includes(term)
+                    );
+                  })
+                  .map(row => (
+                    <tr key={row.id} className="hover:bg-slate-50">
+                      <td className="px-4 py-2 font-mono text-xs text-slate-500">{row.SKU}</td>
+                      <td className="px-4 py-2 font-medium">{row.Item}</td>
+                      <td className="px-4 py-2 text-slate-500">{row.Vendor}</td>
+                      <td className="px-4 py-2 text-slate-500 truncate max-w-xs">{row.Description}</td>
+                      <td className="px-4 py-2 text-right font-mono">{row.Forecast}</td>
+                      <td className="px-4 py-2 text-right font-mono text-slate-500">{row.InStock}</td>
+                      <td className="px-4 py-2 text-right font-mono font-bold bg-blue-50 text-blue-800">{row.Purchase}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="px-6 py-4 border-t bg-slate-50 flex justify-end">
+            <button
+              onClick={() => setSelectedSummary(null)}
+              className="px-4 py-2 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-lg shadow-sm"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+  </div>
+);
+}
+
+// --- Sub-Components ---
+
+// --- UploadScreen Component ---
+
 
 function UploadScreen({ onUpload, sales, inv, onLoadLocal }) {
   return (
